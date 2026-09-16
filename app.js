@@ -125,8 +125,42 @@ function spectrumCSV(samples, state) {
   return headers.join(',') + '\n' + rows.join('\n') + '\n';
 }
 
+// Learning activities reuse the forward model; no spectra or answers are painted in.
+const COLOR_CHOICES = ['Blue / blue-green', 'Green / olive', 'Amber / brown', 'Very dark', 'Other hue'];
+function colorFamily(color) {
+  const name = colorName(color).toLowerCase();
+  if (name === 'very dark water') return 'Very dark';
+  if (name.includes('blue')) return 'Blue / blue-green';
+  if (name.includes('green') || name.includes('olive')) return 'Green / olive';
+  if (name.includes('brown')) return 'Amber / brown';
+  return 'Other hue';
+}
+function makeChallenge(index, random = Math.random) {
+  const base = Object.values(PRESETS)[index % Object.keys(PRESETS).length];
+  const state = { ...base };
+  for (const key of Object.keys(CONFIG)) state[key] = Number((base[key] * (0.8 + 0.4 * random())).toFixed(key === 'cdom' ? 3 : 2));
+  const spectrum = simulate(state), color = spectrumToColor(spectrum);
+  return { state, spectrum, color, answer: colorFamily(color), guess: null, revealed: false };
+}
+function freezeSpectrum(state) {
+  const spectrum = simulate(state);
+  return { state: { ...state }, spectrum, color: spectrumToColor(spectrum), axisMax: Math.max(0.001, ...spectrum.map(p => p.Rrs * 1.12)) };
+}
+function opticalBudget(spectrum, wavelength) {
+  const p = spectrum.find(p => p.wavelength === wavelength);
+  if (!p) throw new RangeError('Choose a sampled wavelength from 400 to 800 nm.');
+  return { point: p, absorption: [['Water',p.aw],['Phytoplankton',p.aph],['Phycocyanin',p.apc],['CDOM',p.ag],['Sediment',p.ased]], backscattering: [['Water',p.bbw],['Phytoplankton-associated particles',p.bbph],['Sediment',p.bbsed],['CDOM (neglected)',0],['PC (cells included in Chl-a)',0]] };
+}
+const CONCEPTS = [
+  { title: 'If only CDOM increases, what happens in this model?', options: ['Blue absorption increases; reflectance decreases.', 'Backscattering increases because CDOM is a particle.', 'The spectrum stays the same.'], correct: 0, explanation: 'CDOM adds exponentially decreasing absorption toward longer wavelengths. It adds no backscattering here. With bb fixed, increasing a decreases u = bb/(a + bb), and therefore Rrs. Fixed display exposure preserves the darkening.', source: 'https://doi.org/10.1029/2001JC000882', experiment: { chl: 1, pc: 0, cdom: 0.02, tss: 0.2, water: 'fresh' }, instruction: 'Reference frozen. Increase only CDOM from 0.02 toward 2 m⁻¹. Compare the blue wavelengths and brightness.' },
+  { title: 'Which feature would extra PC most directly strengthen?', options: ['A peak in absorption near 620 nm.', 'A peak in backscattering at 800 nm.', 'A direct optical measurement of toxins.'], correct: 0, explanation: 'The PC term is centered at 620 nm. At fixed Chl-a, added PC reduces Rrs near this band. This model does not add a second set of cells or a second scattering contribution.', source: 'https://doi.org/10.4319/lo.2005.50.1.0237', experiment: { chl: 20, pc: 0, cdom: 0.2, tss: 1, water: 'fresh' }, instruction: 'Reference frozen. Increase only PC from 0 toward 40 μg/L and inspect the change near 620 nm.' },
+  { title: 'Does this sediment slider change only backscattering?', options: ['Yes—sediment never absorbs light.', 'No—it adds both absorption and backscattering.', 'It changes pure-water absorption.'], correct: 1, explanation: 'This absorbing sediment mixture contributes to both a and bb. Mineralogy and particle size change their mass-specific coefficients in nature, so equal TSS does not guarantee equal color.', source: 'https://doi.org/10.1029/2001JC000882', experiment: { chl: 1, pc: 0, cdom: 0.1, tss: 0, water: 'marine' }, instruction: 'Reference frozen. Increase only TSS toward 30 g/m³. Open optical contributions to watch absorption and backscattering rise together.' },
+  { title: 'Can one RGB color uniquely identify a constituent mixture?', options: ['Yes—every mixture has its own unique color.', 'No—RGB compresses a whole spectrum into three values.', 'Yes—if the color is green.'], correct: 1, explanation: 'Color integration reduces a spectrum to three tristimulus values. Different spectra can give similar colors. Additional wavelengths, measurements and assumptions help constrain constituent retrieval; color alone is not a unique solution.', source: 'https://cie.co.at/datatable/cie-1931-colour-matching-functions-2-degree-observer' },
+  { title: 'Does high PC establish that a bloom is toxic?', options: ['Yes—PC and toxin concentration are identical.', 'No—pigment and toxin measurements are different.', 'Only when the water looks dark green.'], correct: 1, explanation: 'PC is a pigment marker, not a toxin assay. Cyanobacterial biomass and bloom appearance cannot determine toxin concentration; separate measurements are needed.', source: 'https://science.nasa.gov/earth/earth-observatory/lake-erie-blooms-153282/' }
+];
+
 // Export pure functions for reproducible verification without a browser.
-if (typeof module !== 'undefined' && module.exports) module.exports = { simulate, spectrumToColor, spectrumCSV, classify, colorName, sliderToValue, valueToSlider, CONFIG, PRESETS, OPTICAL_TABLE };
+if (typeof module !== 'undefined' && module.exports) module.exports = { simulate, spectrumToColor, spectrumCSV, classify, colorName, sliderToValue, valueToSlider, CONFIG, PRESETS, OPTICAL_TABLE, colorFamily, makeChallenge, freezeSpectrum, opticalBudget, CONCEPTS };
 
 if (typeof document !== 'undefined') boot();
 async function boot() {
@@ -140,6 +174,8 @@ async function boot() {
   }
   const $ = id => document.getElementById(id);
   let current = { ...PRESETS.ocean }, samples, currentColor, chart;
+  let baseline = null, learning = false, round = null, savedExplore = null;
+  let challengeIndex = Math.floor(Math.random() * 5), challengeCount = 0, conceptIndex = 0, conceptChecked = false;
   const controls = {};
   for (const [key, config] of Object.entries(CONFIG)) {
     const card = document.createElement('div'); card.className = 'slider-card';
@@ -208,8 +244,8 @@ async function boot() {
         responsive: true, maintainAspectRatio: false, animation: false, parsing: false,
         interaction: { mode: 'nearest', axis: 'x', intersect: false },
         plugins: { legend: { display: false }, tooltip: { displayColors: false, callbacks: {
-          title: items => `${items[0].parsed.x} nm`, label: item => `Rrs = ${item.parsed.y.toFixed(6)} sr⁻¹`,
-          afterLabel: item => { const p = samples[item.dataIndex]; return [`a = ${p.a.toFixed(4)} m⁻¹`, `bb = ${p.bb.toFixed(4)} m⁻¹`]; }
+          title: items => `${items[0].parsed.x} nm`, label: item => `${item.datasetIndex === 1 ? 'Baseline' : 'Current'} Rrs = ${item.parsed.y.toFixed(6)} sr⁻¹`,
+          afterLabel: item => { const p = (item.datasetIndex === 1 ? baseline.spectrum : samples)[item.dataIndex]; return [`a = ${p.a.toFixed(4)} m⁻¹`, `bb = ${p.bb.toFixed(4)} m⁻¹`]; }
         } } },
         scales: {
           x: { type: 'linear', min: 400, max: 800, title: { display: true, text: 'Wavelength (nm)', color: '#526871' }, grid: { display: false }, ticks: { stepSize: 50, color: '#526871', font: { size: 11 } } },
@@ -225,10 +261,15 @@ async function boot() {
     samples = simulate(current); currentColor = spectrumToColor(samples);
     if (chart) {
       chart.data.datasets[0].data = samples.map(p => ({ x: p.wavelength, y: p.Rrs }));
-      chart.options.scales.y.max = $('fixed-scale').checked ? 0.06 : undefined;
+      chart.data.datasets.length = 1;
+      if (baseline) {
+        chart.data.datasets.push({ label: 'Frozen baseline', data: baseline.spectrum.map(p => ({ x: p.wavelength, y: p.Rrs })), borderColor: '#906b91', borderDash: [6,4], borderWidth: 2, pointRadius: 0, fill: false, tension: 0 });
+        baseline.axisMax = Math.max(baseline.axisMax, ...samples.map(p => p.Rrs * 1.12));
+      }
+      chart.options.scales.y.max = baseline ? baseline.axisMax : $('fixed-scale').checked ? 0.06 : undefined;
       chart.update('none');
-      const clipped = $('fixed-scale').checked && samples.some(p => p.Rrs > 0.06);
-      $('chart-status').textContent = clipped ? 'Some values exceed the locked scale. Unlock to inspect the complete spectrum.' : $('fixed-scale').checked ? 'Vertical scale locked for comparison. Dashed lines mark pigment absorption bands.' : 'Vertical axis rescales automatically. Dashed lines mark pigment absorption bands.';
+      const clipped = !baseline && $('fixed-scale').checked && samples.some(p => p.Rrs > 0.06);
+      $('chart-status').textContent = baseline ? 'Solid: current · dashed: frozen baseline. Shared axis stays fixed, expanding only if needed to fit the data.' : clipped ? 'Some values exceed the locked scale. Unlock to inspect the complete spectrum.' : $('fixed-scale').checked ? 'Vertical scale locked for comparison. Dashed lines mark pigment absorption bands.' : 'Vertical axis rescales automatically. Dashed lines mark pigment absorption bands.';
     } else {
       $('chart-status').textContent = 'Chart library unavailable. The model is running; expand the spectrum data table below.';
     }
@@ -240,6 +281,8 @@ async function boot() {
     surface.setColor(currentColor.linear);
     updateContext();
     if ($('data-details').open) updateData();
+    updateLearningVisibility(); updateComparison();
+    if ($('optical-budget').open) updateBudget();
   }
   function updateContext() {
     const c = classify(current, samples), p = c.green;
@@ -275,6 +318,110 @@ async function boot() {
     const url = URL.createObjectURL(new Blob([spectrumCSV(samples, current)], { type: 'text/csv;charset=utf-8' }));
     const a = document.createElement('a'); a.href = url; a.download = 'water-optics-spectrum.csv';
     document.body.append(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(url), 10000);
+  });
+  function updateComparison() {
+    $('clear-baseline').hidden = !baseline;
+    $('baseline-info').hidden = !baseline;
+    $('freeze').textContent = baseline ? 'Replace frozen baseline' : 'Freeze this spectrum';
+    $('fixed-scale').disabled = !!baseline;
+    $('scale-label').textContent = baseline ? 'Scale managed by comparison' : 'Lock vertical scale (0–0.06)';
+    if (!baseline) { $('comparison-status').textContent = 'Keep a dashed reference curve, then change one constituent to compare.'; return; }
+    const b = baseline.state;
+    $('baseline-swatch').style.background = baseline.color.hex;
+    $('baseline-description').textContent = `Frozen: Chl-a ${b.chl} μg/L · PC ${b.pc} μg/L · CDOM ${b.cdom} m⁻¹ · TSS ${b.tss} g/m³ · ${b.water === 'fresh' ? 'freshwater' : 'seawater'}. ${colorName(baseline.color)}.`;
+    const changes = Object.keys(CONFIG).filter(k => current[k] !== b[k]).map(k => CONFIG[k].label);
+    if (current.water !== b.water) changes.push('water baseline');
+    $('comparison-status').textContent = changes.length ? `Changed: ${changes.join(', ')}. ${changes.length > 1 ? 'Several inputs changed; isolate one to test cause and effect.' : 'One input changed—compare its spectral effect.'}` : 'Baseline captured. Change one constituent; the dashed curve and reference swatch stay fixed.';
+  }
+  $('freeze').addEventListener('click', () => { baseline = freezeSpectrum(current); update(); });
+  $('clear-baseline').addEventListener('click', () => { baseline = null; update(); });
+  function updateBudget() {
+    const nm = Number($('budget-wavelength').value), budget = opticalBudget(samples, nm), p = budget.point;
+    $('budget-nm').textContent = `${nm} nm`;
+    $('abs-total').textContent = `Total: ${p.a.toFixed(5)} m⁻¹`;
+    $('bb-total').textContent = `Total: ${p.bb.toFixed(5)} m⁻¹`;
+    function rows(id, terms, total) {
+      $(id).replaceChildren(...terms.map(([name,value]) => {
+        const row = document.createElement('div'); row.className = 'budget-row';
+        const label = document.createElement('div'), nameEl = document.createElement('span'), valueEl = document.createElement('span');
+        nameEl.textContent = name; valueEl.textContent = `${value.toExponential(3)} m⁻¹ · ${(100*value/total).toFixed(1)}%`;
+        label.append(nameEl,valueEl);
+        const track = document.createElement('div'), bar = document.createElement('div'); track.className = 'budget-track'; track.setAttribute('aria-hidden','true'); bar.style.width = `${100*value/total}%`; track.append(bar); row.append(label,track); return row;
+      }));
+    }
+    rows('abs-bars',budget.absorption,p.a); rows('bb-bars',budget.backscattering,p.bb);
+    $('budget-balance').textContent = `At ${nm} nm: u = bb/(a + bb) = ${p.u.toFixed(5)} → Rrs = ${p.Rrs.toFixed(6)} sr⁻¹. These are the same terms used in the spectrum above.`;
+  }
+  $('budget-wavelength').addEventListener('input',updateBudget);
+  $('optical-budget').addEventListener('toggle', () => { if ($('optical-budget').open) updateBudget(); });
+  function choices(container, name, labels, onChange) {
+    container.replaceChildren();
+    const legend = document.createElement('legend'); legend.textContent = 'Choose one answer'; container.append(legend);
+    labels.forEach((text,i) => { const label = document.createElement('label'); label.className = 'choice'; const input = document.createElement('input'); input.type = 'radio'; input.name = name; input.value = String(i); input.addEventListener('change',()=>onChange(i)); label.append(input,document.createTextNode(text)); container.append(label); });
+  }
+  function updateLearningVisibility() {
+    const hidden = learning && !round.revealed;
+    $('learning').hidden = !learning;
+    $('appearance-content').hidden = hidden; $('appearance-hidden').hidden = !hidden;
+    // Hide all obvious clues, including screen-reader content, until the reveal.
+    [document.querySelector('.scenario-bar'),$('constituents'),document.querySelector('.context'),document.querySelector('.why'),$('model'),$('comparison'),$('optical-budget')].forEach(el => { el.hidden = hidden; });
+    $('concept-check').hidden = !learning || hidden;
+    $('explore-mode').setAttribute('aria-pressed',String(!learning)); $('learn-mode').setAttribute('aria-pressed',String(learning));
+    $('mode-description').textContent = learning ? 'Predict, reveal, then experiment. Your Explore mixture is saved.' : 'Explore freely, or try a spectrum-to-color challenge.';
+  }
+  function nextChallenge() {
+    round = makeChallenge(challengeIndex++); challengeCount++;
+    current = { ...round.state }; baseline = null; $('fixed-scale').checked = false;
+    $('prediction-feedback').hidden = true; $('prediction-feedback').textContent = '';
+    $('reveal').disabled = true; $('reveal').textContent = 'Reveal water & explanation';
+    choices($('prediction-options'),'prediction',COLOR_CHOICES,i=> { round.guess = COLOR_CHOICES[i]; $('reveal').disabled = false; });
+    $('challenge-count').textContent = `Challenge ${challengeCount}`;
+    sync(); setCustom(); update();
+  }
+  function setMode(next) {
+    if (next === learning) return;
+    if (next) {
+      savedExplore = { state: { ...current }, baseline, fixed: $('fixed-scale').checked, preset: document.querySelector('[data-preset][aria-pressed="true"]')?.dataset.preset, label: $('scenario-name').textContent };
+      learning = true; nextChallenge(); renderConcept();
+    } else {
+      learning = false; current = { ...savedExplore.state }; baseline = savedExplore.baseline; $('fixed-scale').checked = savedExplore.fixed;
+      sync(); setCustom();
+      if (savedExplore.preset) document.querySelector(`[data-preset="${savedExplore.preset}"]`).setAttribute('aria-pressed','true');
+      $('scenario-name').textContent = savedExplore.label; update();
+    }
+  }
+  $('learn-mode').addEventListener('click',()=>setMode(true)); $('explore-mode').addEventListener('click',()=>setMode(false));
+  $('next-challenge').addEventListener('click',nextChallenge);
+  $('reveal').addEventListener('click',()=> {
+    if (!round.guess || round.revealed) return;
+    round.revealed = true;
+    $('prediction-options').querySelectorAll('input').forEach(el=>el.disabled=true);
+    $('reveal').disabled = true; $('reveal').textContent = 'Water revealed';
+    const peak = round.spectrum.reduce((a,b)=>a.Rrs>b.Rrs?a:b);
+    const feedback = $('prediction-feedback'); feedback.hidden = false;
+    feedback.textContent = `${round.guess === round.answer ? 'Good prediction.' : 'Compare your prediction with the model.'} You chose ${round.guess.toLowerCase()}; the calculated family is ${round.answer.toLowerCase()} (${colorName(round.color).toLowerCase()}). The largest modeled Rrs is at ${peak.wavelength} nm, but color depends on the whole visible spectrum weighted by daylight and human vision—not just its highest point. This answer refers to the starting mixture. Now freeze it and change one slider to explore.`;
+    update();
+  });
+  function renderConcept() {
+    const q = CONCEPTS[conceptIndex]; conceptChecked = false;
+    $('concept-title').textContent = q.title; $('concept-feedback').hidden = true; $('concept-feedback').textContent = '';
+    $('check-concept').disabled = true; $('try-concept').hidden = true;
+    choices($('concept-options'),'concept',q.options,()=> { $('check-concept').disabled = false; });
+  }
+  $('check-concept').addEventListener('click',()=> {
+    const selected = $('concept-options').querySelector('input:checked'); if (!selected || conceptChecked) return;
+    conceptChecked = true; const q = CONCEPTS[conceptIndex];
+    const feedback = $('concept-feedback'); feedback.hidden = false;
+    feedback.textContent = `${Number(selected.value) === q.correct ? 'Correct. ' : 'Not quite. '} ${q.explanation} `;
+    const a = document.createElement('a'); a.href = q.source; a.textContent = 'Scientific reference ↗'; feedback.append(a);
+    $('concept-options').querySelectorAll('input').forEach(el=>el.disabled=true); $('check-concept').disabled = true; $('try-concept').hidden = !q.experiment;
+  });
+  $('next-concept').addEventListener('click',()=> { conceptIndex = (conceptIndex+1)%CONCEPTS.length; renderConcept(); });
+  $('try-concept').addEventListener('click',()=> {
+    const q = CONCEPTS[conceptIndex]; if (!q.experiment) return;
+    current = { ...q.experiment }; baseline = freezeSpectrum(current); sync(); setCustom(); update();
+    $('concept-feedback').textContent = `${q.explanation} ${q.instruction}`;
+    $('constituents').scrollIntoView({behavior:window.matchMedia('(prefers-reduced-motion: reduce)').matches?'auto':'smooth',block:'start'});
   });
   sync(); update();
   // Small inspection API for teaching, QA and downstream experiments.
