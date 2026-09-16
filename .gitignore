@@ -1,0 +1,39 @@
+# Operating-system files
+.DS_Store
+._*
+Thumbs.db
+Desktop.ini
+
+# Editor settings and temporary files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Local secrets (the app itself needs no environment variables)
+.env
+.env.*
+!.env.example
+
+# Optional development dependencies and caches
+node_modules/
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.cache/
+
+# Test reports and logs
+coverage/
+playwright-report/
+test-results/
+*.log
+
+# Generated downloads and release archives
+water-optics-spectrum*.csv
+Water_Optics_Lab_GitHub_Pages.zip
+
+# Keep app.js, index.html, style.css, .nojekyll, data/, and vendor/ tracked.
+# They contain the app, reference data, and offline chart-library fallback.
