@@ -5,3 +5,14 @@
 .water-type{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin:-6px 0 22px;font-size:13px;color:var(--muted)}.water-type select{font:inherit;color:var(--ink);background:#f7fafb;border:1px solid #cedce0;border-radius:4px;padding:5px 10px}input[aria-invalid=true]{border-color:#b7463d;background:#fff0ed}
 
 @media(min-width:801px){.masthead{height:64px}main{padding-top:24px}.intro{margin-bottom:20px}.chart-wrap{height:246px}.water-view{height:226px}.panel-heading{padding-top:18px}.controls{padding-top:18px}.controls .section-heading{margin-bottom:16px}.water-type{margin-bottom:16px}}
+
+/* v2: creator, contact, and related research. */
+.about-lab{display:grid;grid-template-columns:minmax(0,1.3fr) minmax(0,1fr);gap:36px;margin:36px 0 28px;padding:28px;background:#e7eff2;border:1px solid var(--line);border-radius:10px}
+.about-lab h2{font-size:20px;margin-bottom:10px}
+.about-lab h3{font-size:20px;margin:0 0 10px}
+.about-lab p:not(.eyebrow){font-size:14px;line-height:1.65;color:var(--muted);margin-bottom:12px}
+.contact-links{display:flex;flex-wrap:wrap;gap:10px 22px;font-size:14px}
+.about-lab a{overflow-wrap:anywhere}
+.project-info{border-left:1px solid #c6d7dd;padding-left:32px}
+.project-info p:last-child{margin-bottom:0}
+@media(max-width:800px){.about-lab{grid-template-columns:1fr;gap:24px;padding:22px}.project-info{border-left:0;border-top:1px solid #c6d7dd;padding:22px 0 0}}
